@@ -1,0 +1,4 @@
+dependencies:
+  idf:
+    version: '>=4.4'
+  zorxx/lcd1602: ^1.2.0

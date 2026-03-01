@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ESP-IDF build artifacts
+build/
+
+# ESP-IDF generated config backup
+sdkconfig.old
+
+# Logs / temp
+*.log
+*.tmp
+
+# Capture files (sigrok / PulseView)
+*.sr
+*.pvs
+
+# Python cache (if tooling scripts are added later)
+__pycache__/
+*.pyc

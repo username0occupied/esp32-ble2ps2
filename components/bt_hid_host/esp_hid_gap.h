@@ -92,6 +92,19 @@ esp_err_t esp_hid_scan_set_known_bda(const uint8_t (*bda_list)[6], size_t num);
 typedef void (*esp_hid_gap_passkey_cb_t)(bool show, uint32_t passkey, void *ctx);
 void esp_hid_gap_set_passkey_callback(esp_hid_gap_passkey_cb_t cb, void *ctx);
 
+typedef struct {
+    uint8_t bda[6];
+    uint16_t min_int;
+    uint16_t max_int;
+    uint16_t latency;
+    uint16_t conn_int_ms;
+    uint16_t timeout_ms;
+    uint8_t status;
+} esp_hid_gap_conn_params_evt_t;
+
+typedef void (*esp_hid_gap_conn_params_cb_t)(const esp_hid_gap_conn_params_evt_t *evt, void *ctx);
+void esp_hid_gap_set_conn_params_callback(esp_hid_gap_conn_params_cb_t cb, void *ctx);
+
 esp_err_t esp_hid_ble_gap_adv_init(uint16_t appearance, const char *device_name);
 esp_err_t esp_hid_ble_gap_adv_start(void);
 

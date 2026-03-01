@@ -91,6 +91,10 @@ static bool s_kbd_connected;
 static bool s_mouse_connected;
 static int64_t s_kbd_open_ts;
 static int64_t s_mouse_open_ts;
+static bool s_mouse_min_interval_locked;
+static uint16_t s_mouse_min_interval_units;
+static uint8_t s_mouse_conn_probe_stage;
+static bool s_mouse_conn_probe_active;
 static bt_hid_host_callbacks_t s_callbacks;
 static void *s_callbacks_ctx;
 static bool s_started;
@@ -358,9 +362,59 @@ static void hid_clear_pending_by_bda(const uint8_t *bda)
 }
 
 #if !CONFIG_BT_NIMBLE_ENABLED
+typedef struct {
+    uint16_t min_int;
+    uint16_t max_int;
+} hid_conn_probe_profile_t;
+
+static const hid_conn_probe_profile_t s_mouse_conn_probe_profiles[] = {
+    {HID_LOW_LATENCY_CONN_MIN_INT, HID_LOW_LATENCY_CONN_MAX_INT}, // 7.5~11.25 ms
+    {10, 12},                                                      // 12.5~15 ms
+    {13, 16},                                                      // 16.25~20 ms
+};
+
+static esp_err_t hid_request_mouse_conn_interval_exact(const uint8_t *bda, uint16_t interval_units)
+{
+    if (bda == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (interval_units < 0x0006 || interval_units > 0x0C80) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_ble_conn_update_params_t conn_params = {0};
+    memcpy(conn_params.bda, bda, sizeof(conn_params.bda));
+    conn_params.min_int = interval_units;
+    conn_params.max_int = interval_units;
+    conn_params.latency = HID_LOW_LATENCY_CONN_LATENCY;
+    conn_params.timeout = HID_LOW_LATENCY_CONN_TIMEOUT;
+    return esp_ble_gap_update_conn_params(&conn_params);
+}
+
+static esp_err_t hid_request_mouse_conn_interval_window(const uint8_t *bda, uint16_t min_int, uint16_t max_int)
+{
+    if (bda == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (min_int < 0x0006 || max_int > 0x0C80 || min_int > max_int) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_ble_conn_update_params_t conn_params = {0};
+    memcpy(conn_params.bda, bda, sizeof(conn_params.bda));
+    conn_params.min_int = min_int;
+    conn_params.max_int = max_int;
+    conn_params.latency = HID_LOW_LATENCY_CONN_LATENCY;
+    conn_params.timeout = HID_LOW_LATENCY_CONN_TIMEOUT;
+    return esp_ble_gap_update_conn_params(&conn_params);
+}
+
 static void hid_request_low_latency_conn_params(esp_hidh_dev_t *dev, hid_role_t role)
 {
     if (dev == NULL || role != HID_ROLE_MOUSE) {
+        return;
+    }
+    if (s_mouse_min_interval_locked || s_mouse_conn_probe_active) {
         return;
     }
 
@@ -373,34 +427,132 @@ static void hid_request_low_latency_conn_params(esp_hidh_dev_t *dev, hid_role_t 
         return;
     }
 
-    esp_ble_conn_update_params_t conn_params = {0};
-    memcpy(conn_params.bda, bda, sizeof(conn_params.bda));
-    conn_params.min_int = HID_LOW_LATENCY_CONN_MIN_INT;
-    conn_params.max_int = HID_LOW_LATENCY_CONN_MAX_INT;
-    conn_params.latency = HID_LOW_LATENCY_CONN_LATENCY;
-    conn_params.timeout = HID_LOW_LATENCY_CONN_TIMEOUT;
+    const uint8_t stage = 0;
+    s_mouse_conn_probe_stage = stage;
+    const hid_conn_probe_profile_t *p = &s_mouse_conn_probe_profiles[stage];
 
-    esp_err_t err = esp_ble_gap_update_conn_params(&conn_params);
+    esp_err_t err = hid_request_mouse_conn_interval_window(bda, p->min_int, p->max_int);
     if (err != ESP_OK) {
+        s_mouse_conn_probe_active = false;
         ESP_LOGW(TAG,
-                 "conn param update request failed for mouse " ESP_BD_ADDR_STR
-                 " (min=%u max=%u lat=%u to=%u): %s",
+                 "conn param probe request failed for mouse " ESP_BD_ADDR_STR
+                 " stage=%u (min=%u max=%u): %s",
                  ESP_BD_ADDR_HEX(bda),
-                 (unsigned)conn_params.min_int,
-                 (unsigned)conn_params.max_int,
-                 (unsigned)conn_params.latency,
-                 (unsigned)conn_params.timeout,
+                 (unsigned)stage,
+                 (unsigned)p->min_int,
+                 (unsigned)p->max_int,
                  esp_err_to_name(err));
     } else {
+        s_mouse_conn_probe_active = true;
         ESP_LOGI(TAG,
-                 "requested low-latency conn params for mouse " ESP_BD_ADDR_STR
-                 " (min=%u max=%u lat=%u to=%u)",
+                 "requested mouse conn param probe " ESP_BD_ADDR_STR
+                 " stage=%u (min=%u max=%u)",
                  ESP_BD_ADDR_HEX(bda),
-                 (unsigned)conn_params.min_int,
-                 (unsigned)conn_params.max_int,
-                 (unsigned)conn_params.latency,
-                 (unsigned)conn_params.timeout);
+                 (unsigned)stage,
+                 (unsigned)p->min_int,
+                 (unsigned)p->max_int);
     }
+}
+
+static void hid_gap_conn_params_cb(const esp_hid_gap_conn_params_evt_t *evt, void *ctx)
+{
+    (void)ctx;
+    if (evt == NULL) {
+        return;
+    }
+    if (!s_known_mouse.valid || !hid_bda_equal(evt->bda, s_known_mouse.bda)) {
+        return;
+    }
+
+    if (evt->status != ESP_BT_STATUS_SUCCESS) {
+        if (s_mouse_min_interval_locked) {
+            return;
+        }
+        ESP_LOGI(TAG,
+                 "mouse conn params observed " ESP_BD_ADDR_STR
+                 " min=%u max=%u lat=%u conn=%ums to=%ums",
+                 ESP_BD_ADDR_HEX(evt->bda),
+                 (unsigned)evt->min_int,
+                 (unsigned)evt->max_int,
+                 (unsigned)evt->latency,
+                 (unsigned)evt->conn_int_ms,
+                 (unsigned)evt->timeout_ms);
+        if (s_mouse_conn_probe_stage + 1 >= (uint8_t)(sizeof(s_mouse_conn_probe_profiles) / sizeof(s_mouse_conn_probe_profiles[0]))) {
+            s_mouse_conn_probe_active = false;
+            ESP_LOGW(TAG, "mouse conn probe exhausted, keep current interval (conn=%ums)",
+                     (unsigned)evt->conn_int_ms);
+            return;
+        }
+
+        const uint8_t next_stage = s_mouse_conn_probe_stage + 1;
+        s_mouse_conn_probe_stage = next_stage;
+        const hid_conn_probe_profile_t *p = &s_mouse_conn_probe_profiles[next_stage];
+        esp_err_t probe_err = hid_request_mouse_conn_interval_window(evt->bda, p->min_int, p->max_int);
+        if (probe_err != ESP_OK) {
+            s_mouse_conn_probe_active = false;
+            ESP_LOGW(TAG,
+                     "mouse conn probe request failed " ESP_BD_ADDR_STR
+                     " stage=%u (min=%u max=%u): %s",
+                     ESP_BD_ADDR_HEX(evt->bda),
+                     (unsigned)next_stage,
+                     (unsigned)p->min_int,
+                     (unsigned)p->max_int,
+                     esp_err_to_name(probe_err));
+        } else {
+            s_mouse_conn_probe_active = true;
+            ESP_LOGI(TAG,
+                     "requested mouse conn probe " ESP_BD_ADDR_STR
+                     " stage=%u (min=%u max=%u)",
+                     ESP_BD_ADDR_HEX(evt->bda),
+                     (unsigned)next_stage,
+                     (unsigned)p->min_int,
+                     (unsigned)p->max_int);
+        }
+        return;
+    }
+
+    ESP_LOGI(TAG,
+             "mouse conn params observed " ESP_BD_ADDR_STR
+             " min=%u max=%u lat=%u conn=%ums to=%ums",
+             ESP_BD_ADDR_HEX(evt->bda),
+             (unsigned)evt->min_int,
+             (unsigned)evt->max_int,
+             (unsigned)evt->latency,
+             (unsigned)evt->conn_int_ms,
+             (unsigned)evt->timeout_ms);
+
+    // For accepted updates, min_int/max_int carry interval units (1.25ms steps) and
+    // are more reliable than conn_int_ms (which may be rounded/truncated by stack logs).
+    uint16_t exact_units = 0;
+    if (evt->min_int >= 0x0006 && evt->min_int <= 0x0C80) {
+        exact_units = evt->min_int;
+    } else if (evt->conn_int_ms >= 0x0006 && evt->conn_int_ms <= 0x0C80) {
+        exact_units = evt->conn_int_ms;
+    }
+    if (exact_units < 0x0006 || exact_units > 0x0C80) {
+        s_mouse_conn_probe_active = false;
+        return;
+    }
+    if (s_mouse_min_interval_locked && s_mouse_min_interval_units == exact_units) {
+        s_mouse_conn_probe_active = false;
+        return;
+    }
+
+    esp_err_t err = hid_request_mouse_conn_interval_exact(evt->bda, exact_units);
+    if (err != ESP_OK) {
+        s_mouse_conn_probe_active = false;
+        ESP_LOGW(TAG, "request exact mouse interval failed " ESP_BD_ADDR_STR " units=%u: %s",
+                 ESP_BD_ADDR_HEX(evt->bda), (unsigned)exact_units, esp_err_to_name(err));
+        return;
+    }
+
+    s_mouse_min_interval_locked = true;
+    s_mouse_min_interval_units = exact_units;
+    s_mouse_conn_probe_active = false;
+    ESP_LOGI(TAG, "requested exact mouse interval " ESP_BD_ADDR_STR " -> %u (%.2f ms)",
+             ESP_BD_ADDR_HEX(evt->bda),
+             (unsigned)exact_units,
+             (double)exact_units * 1.25);
 }
 #endif
 
@@ -460,6 +612,7 @@ static void hid_on_open_success(esp_hidh_dev_t *dev)
             hid_known_clear(&s_known_mouse);
         }
     } else if (actual_role == HID_ROLE_MOUSE) {
+        bool same_mouse_reopen = s_mouse_connected && s_known_mouse.valid && hid_bda_equal(bda, s_known_mouse.bda);
         s_mouse_connected = true;
         emit_mouse_conn(true);
         s_known_mouse.valid = true;
@@ -468,6 +621,12 @@ static void hid_on_open_success(esp_hidh_dev_t *dev)
         s_known_mouse.addr_type = addr_type;
         s_known_mouse.usage = usage;
         s_known_mouse.role = HID_ROLE_MOUSE;
+        if (!same_mouse_reopen) {
+            s_mouse_min_interval_locked = false;
+            s_mouse_min_interval_units = 0;
+            s_mouse_conn_probe_stage = 0;
+            s_mouse_conn_probe_active = false;
+        }
         hid_store_known_device(HID_NVS_KEY_MOUSE, &s_known_mouse);
         if (s_known_kbd.valid && hid_bda_equal(bda, s_known_kbd.bda)) {
             hid_known_clear(&s_known_kbd);
@@ -995,6 +1154,10 @@ static void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id,
             if (s_known_mouse.valid && hid_bda_equal(bda, s_known_mouse.bda)) {
                 s_mouse_connected = false;
                 emit_mouse_conn(false);
+                s_mouse_min_interval_locked = false;
+                s_mouse_min_interval_units = 0;
+                s_mouse_conn_probe_stage = 0;
+                s_mouse_conn_probe_active = false;
             }
             emit_passkey(false, 0);
             hid_clear_pending_by_bda(bda);
@@ -1027,6 +1190,10 @@ esp_err_t bt_hid_host_init(const bt_hid_host_callbacks_t *cbs, void *ctx)
     s_mouse_connected = false;
     s_kbd_open_ts = 0;
     s_mouse_open_ts = 0;
+    s_mouse_min_interval_locked = false;
+    s_mouse_min_interval_units = 0;
+    s_mouse_conn_probe_stage = 0;
+    s_mouse_conn_probe_active = false;
 
     if (!s_hid_evt_group) {
         s_hid_evt_group = xEventGroupCreate();
@@ -1068,6 +1235,9 @@ esp_err_t bt_hid_host_start(void)
     ESP_LOGI(TAG, "setting hid gap, mode:%d", HID_HOST_MODE);
     ESP_RETURN_ON_ERROR(esp_hid_gap_init(HID_HOST_MODE), TAG, "esp_hid_gap_init failed");
     esp_hid_gap_set_passkey_callback(hid_gap_passkey_cb, NULL);
+#if !CONFIG_BT_NIMBLE_ENABLED
+    esp_hid_gap_set_conn_params_callback(hid_gap_conn_params_cb, NULL);
+#endif
 #if CONFIG_BT_BLE_ENABLED
     ESP_RETURN_ON_ERROR(esp_ble_gattc_register_callback(esp_hidh_gattc_event_handler), TAG,
                         "esp_ble_gattc_register_callback failed");

@@ -61,6 +61,8 @@ static SemaphoreHandle_t ble_hidh_cb_semaphore = NULL;
 
 static esp_hid_gap_passkey_cb_t s_passkey_cb = NULL;
 static void *s_passkey_cb_ctx = NULL;
+static esp_hid_gap_conn_params_cb_t s_conn_params_cb = NULL;
+static void *s_conn_params_cb_ctx = NULL;
 
 static bool ble_scan_is_known_bda(const uint8_t *bda)
 {
@@ -676,6 +678,43 @@ static void ble_gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_p
         esp_ble_gap_security_rsp(param->ble_security.ble_req.bd_addr, true);
         break;
 
+    case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT:
+        if (param->update_conn_params.status == ESP_BT_STATUS_SUCCESS) {
+            ESP_LOGI(TAG,
+                     "BLE GAP UPDATE_CONN_PARAMS " ESP_BD_ADDR_STR
+                     " st=0x%02x min=%u max=%u lat=%u conn=%ums to=%ums",
+                     ESP_BD_ADDR_HEX(param->update_conn_params.bda),
+                     (unsigned)param->update_conn_params.status,
+                     (unsigned)param->update_conn_params.min_int,
+                     (unsigned)param->update_conn_params.max_int,
+                     (unsigned)param->update_conn_params.latency,
+                     (unsigned)param->update_conn_params.conn_int,
+                     (unsigned)param->update_conn_params.timeout);
+        } else {
+            ESP_LOGV(TAG,
+                     "BLE GAP UPDATE_CONN_PARAMS " ESP_BD_ADDR_STR
+                     " st=0x%02x min=%u max=%u lat=%u conn=%ums to=%ums",
+                     ESP_BD_ADDR_HEX(param->update_conn_params.bda),
+                     (unsigned)param->update_conn_params.status,
+                     (unsigned)param->update_conn_params.min_int,
+                     (unsigned)param->update_conn_params.max_int,
+                     (unsigned)param->update_conn_params.latency,
+                     (unsigned)param->update_conn_params.conn_int,
+                     (unsigned)param->update_conn_params.timeout);
+        }
+        if (s_conn_params_cb) {
+            esp_hid_gap_conn_params_evt_t evt = {0};
+            memcpy(evt.bda, param->update_conn_params.bda, sizeof(evt.bda));
+            evt.min_int = param->update_conn_params.min_int;
+            evt.max_int = param->update_conn_params.max_int;
+            evt.latency = param->update_conn_params.latency;
+            evt.conn_int_ms = param->update_conn_params.conn_int;
+            evt.timeout_ms = param->update_conn_params.timeout;
+            evt.status = (uint8_t)param->update_conn_params.status;
+            s_conn_params_cb(&evt, s_conn_params_cb_ctx);
+        }
+        break;
+
     default:
         ESP_LOGV(TAG, "BLE GAP EVENT %s", ble_gap_evt_str(event));
         break;
@@ -1190,6 +1229,12 @@ void esp_hid_gap_set_passkey_callback(esp_hid_gap_passkey_cb_t cb, void *ctx)
 {
     s_passkey_cb = cb;
     s_passkey_cb_ctx = ctx;
+}
+
+void esp_hid_gap_set_conn_params_callback(esp_hid_gap_conn_params_cb_t cb, void *ctx)
+{
+    s_conn_params_cb = cb;
+    s_conn_params_cb_ctx = ctx;
 }
 
 esp_err_t esp_hid_scan(uint32_t seconds, size_t *num_results, esp_hid_scan_result_t **results)

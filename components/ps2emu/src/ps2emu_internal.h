@@ -54,8 +54,11 @@ typedef struct {
 
 typedef enum {
     PS2_RX_STAGE_BITS = 0,
+    PS2_RX_STAGE_WAIT_STOP,
+    PS2_RX_STAGE_STOP_LOW,
+    PS2_RX_STAGE_STOP_HIGH,
+    PS2_RX_STAGE_ACK_SETUP,
     PS2_RX_STAGE_ACK_LOW,
-    PS2_RX_STAGE_ACK_HIGH,
 } ps2_rx_stage_t;
 
 typedef struct {

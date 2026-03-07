@@ -101,8 +101,26 @@ void ps2emu_keyboard_handle_host_byte(uint8_t pc_idx, uint8_t byte, bool parity_
     }
 
     if (kbd->rx_state == KBD_RX_WAIT_LED_MASK) {
+        if (byte == 0xED) {
+            // Host may resend SET_LED if previous ACK (0xFA) was missed.
+            ESP_LOGW(TAG, "PC%u SET_LED retried while waiting LED mask, ack and keep waiting", (unsigned)pc_idx + 1);
+            kbd_send(pc_idx, 0xFA);
+            return;
+        }
+        if ((byte & 0xF8) != 0) {
+            ESP_LOGW(TAG, "PC%u invalid LED mask 0x%02X, request resend", (unsigned)pc_idx + 1, (unsigned)byte);
+            kbd_send(pc_idx, 0xFE);
+            return;
+        }
+
+        bool scroll = (byte & 0x01) != 0;
+        bool num = (byte & 0x02) != 0;
+        bool caps = (byte & 0x04) != 0;
+        ESP_LOGI(TAG, "PC%u LED mask=0x%02X -> scroll=%u num=%u caps=%u",
+                 (unsigned)pc_idx + 1, (unsigned)byte,
+                 scroll ? 1U : 0U, num ? 1U : 0U, caps ? 1U : 0U);
         kbd_send(pc_idx, 0xFA);
-        emit_led_event_if_changed(pc_idx, (byte & 0x01) != 0, (byte & 0x02) != 0, (byte & 0x04) != 0);
+        emit_led_event_if_changed(pc_idx, scroll, num, caps);
         kbd->rx_state = KBD_RX_IDLE;
         return;
     }
@@ -180,6 +198,7 @@ void ps2emu_keyboard_handle_host_byte(uint8_t pc_idx, uint8_t byte, bool parity_
             break;
 
         case 0xED:  // Set/reset LEDs
+            ESP_LOGI(TAG, "PC%u SET_LED command (0xED)", (unsigned)pc_idx + 1);
             kbd_send(pc_idx, 0xFA);
             kbd->rx_state = KBD_RX_WAIT_LED_MASK;
             break;

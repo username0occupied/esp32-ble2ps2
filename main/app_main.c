@@ -55,12 +55,25 @@ void app_main(void)
         .on_passkey = input_router_on_passkey,
     };
     input_router_status_t status = {0};
+    bool lcd_ready = false;
 
+    ESP_LOGI(TAG, "Build date/time: %s %s", __DATE__, __TIME__);
     ESP_ERROR_CHECK(app_nvs_init());
-    ESP_ERROR_CHECK(lcd1602_drv_init());
-    ESP_ERROR_CHECK(input_router_init(app_status_to_lcd, NULL));
+    esp_err_t lcd_err = lcd1602_drv_init();
+    if (lcd_err == ESP_OK) {
+        lcd_ready = true;
+    } else {
+        ESP_LOGW(TAG, "LCD init failed, continue without LCD: %s", esp_err_to_name(lcd_err));
+    }
+
+    ESP_ERROR_CHECK(input_router_init(lcd_ready ? app_status_to_lcd : NULL, NULL));
     ESP_ERROR_CHECK(input_router_get_status(&status));
-    ESP_ERROR_CHECK(lcd1602_drv_update(&status));
+    if (lcd_ready) {
+        lcd_err = lcd1602_drv_update(&status);
+        if (lcd_err != ESP_OK) {
+            ESP_LOGW(TAG, "lcd initial update failed: %s", esp_err_to_name(lcd_err));
+        }
+    }
 
     ESP_ERROR_CHECK(ps2emu_init(&ps2_cfg));
     ESP_ERROR_CHECK(ps2emu_keyboard_set_led_callback(input_router_on_ps2_led, NULL));

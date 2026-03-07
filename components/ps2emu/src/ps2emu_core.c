@@ -25,6 +25,12 @@ static void ps2emu_protocol_task(void *arg)
             continue;
         }
 
+        if (msg.parity_error || msg.framing_error) {
+            ESP_LOGW(TAG, "RX host byte error: port=%u byte=0x%02X parity=%u framing=%u",
+                     (unsigned)msg.port, (unsigned)msg.byte,
+                     msg.parity_error ? 1U : 0U, msg.framing_error ? 1U : 0U);
+        }
+
         const ps2_port_runtime_t *p = &g_ps2emu.port[msg.port];
         if (p->kind == PS2_DEV_KBD) {
             ps2emu_keyboard_handle_host_byte(p->pc_idx, msg.byte, msg.parity_error, msg.framing_error);

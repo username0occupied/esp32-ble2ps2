@@ -122,7 +122,8 @@ static void IRAM_ATTR ps2_start_rx(ps2_port_runtime_t *p)
     p->rx_stage = PS2_RX_STAGE_BITS;
     p->rx_bit_index = 0;
     p->rx_byte = 0;
-    p->rx_start_bit = 1;
+    // Host request-to-send already guarantees start condition (DAT low while CLK high).
+    p->rx_start_bit = 0;
     p->rx_stop_bit = 0;
     p->rx_parity_bit = 0;
     p->rx_parity_acc = 1;
@@ -166,34 +167,75 @@ static void IRAM_ATTR ps2_step_rx(ps2_port_id_t port, ps2_port_runtime_t *p, Bas
         p->rx_clk_low_phase = false;
 
         uint8_t sample = (uint8_t)(ps2_line_read(p->line.dat) & 0x1);
-        if (p->rx_bit_index == 0) {
-            p->rx_start_bit = sample;
-        } else if (p->rx_bit_index >= 1 && p->rx_bit_index <= 8) {
-            p->rx_byte |= (uint8_t)(sample << (p->rx_bit_index - 1));
+        if (p->rx_bit_index <= 7) {
+            // In host-to-device transfer, first clocked bit is data0 (start is request phase).
+            p->rx_byte |= (uint8_t)(sample << p->rx_bit_index);
             p->rx_parity_acc ^= sample;
-        } else if (p->rx_bit_index == 9) {
+        } else if (p->rx_bit_index == 8) {
+            // Final sampled bit before stop is parity.
             p->rx_parity_bit = sample;
             p->rx_parity_acc ^= sample;
-        } else if (p->rx_bit_index == 10) {
-            p->rx_stop_bit = sample;
         }
 
         p->rx_bit_index++;
-        if (p->rx_bit_index >= 11) {
-            p->rx_stage = PS2_RX_STAGE_ACK_LOW;
+        if (p->rx_bit_index >= 9) {
+            /*
+             * After 8 data + parity, always generate one stop clock cycle first.
+             * Some hosts release DATA only after seeing this clock transition.
+             */
+            p->rx_stage = PS2_RX_STAGE_STOP_LOW;
+            p->ticks_to_step = g_ps2emu.half_ticks;
         }
+        return;
+    }
+
+    if (p->rx_stage == PS2_RX_STAGE_WAIT_STOP) {
+        if (ps2_line_read(p->line.clk) == 1 && ps2_line_read(p->line.dat) == 1) {
+            p->rx_stop_bit = 1;
+            ps2_line_low(p->line.dat);
+            p->rx_stage = PS2_RX_STAGE_ACK_SETUP;
+            p->ticks_to_step = g_ps2emu.half_ticks;
+        }
+        return;
+    }
+
+    if (p->rx_stage == PS2_RX_STAGE_STOP_LOW) {
+        // Stop bit: clock low while DATA remains released (high).
+        ps2_line_release(p->line.dat);
+        ps2_line_low(p->line.clk);
+        p->rx_stage = PS2_RX_STAGE_STOP_HIGH;
+        return;
+    }
+
+    if (p->rx_stage == PS2_RX_STAGE_STOP_HIGH) {
+        // End of stop bit clock, then wait host DATA release (stop=1) before ACK.
+        ps2_line_release(p->line.clk);
+        if (ps2_line_read(p->line.dat) == 1) {
+            p->rx_stop_bit = 1;
+            ps2_line_low(p->line.dat);
+            p->rx_stage = PS2_RX_STAGE_ACK_SETUP;
+        } else {
+            p->rx_stage = PS2_RX_STAGE_WAIT_STOP;
+        }
+        p->ticks_to_step = g_ps2emu.half_ticks;
+        return;
+    }
+
+    if (p->rx_stage == PS2_RX_STAGE_ACK_SETUP) {
+        // ACK clock low phase.
+        ps2_line_low(p->line.clk);
+        p->rx_stage = PS2_RX_STAGE_ACK_LOW;
         return;
     }
 
     if (p->rx_stage == PS2_RX_STAGE_ACK_LOW) {
-        ps2_line_low(p->line.dat);
-        ps2_line_low(p->line.clk);
-        p->rx_stage = PS2_RX_STAGE_ACK_HIGH;
+        // Release ACK by releasing both CLK and DAT in the same scheduler step.
+        ps2_line_release(p->line.clk);
+        ps2_line_release(p->line.dat);
+        ps2_finalize_rx(port, p, woken);
         return;
     }
 
-    ps2_line_release(p->line.clk);
-    ps2_line_release(p->line.dat);
     ps2_finalize_rx(port, p, woken);
 }
 
@@ -209,7 +251,8 @@ static bool IRAM_ATTR ps2_timer_on_alarm(gptimer_handle_t timer, const gptimer_a
     for (int i = 0; i < PS2_PORT_MAX; ++i) {
         ps2_port_runtime_t *p = &g_ps2emu.port[i];
 
-        if (p->host_req_pending && !p->tx_active && !p->rx_active) {
+        if (p->host_req_pending && !p->tx_active && !p->rx_active &&
+            ps2_line_read(p->line.clk) == 1 && ps2_line_read(p->line.dat) == 0) {
             ps2_start_rx(p);
         }
 
@@ -225,7 +268,7 @@ static bool IRAM_ATTR ps2_timer_on_alarm(gptimer_handle_t timer, const gptimer_a
                     ps2_step_rx((ps2_port_id_t)i, p, &task_woken);
                 }
 
-                if (p->tx_active || p->rx_active) {
+                if ((p->tx_active || p->rx_active) && p->ticks_to_step == 0) {
                     p->ticks_to_step = g_ps2emu.half_ticks;
                 }
             }
@@ -254,11 +297,23 @@ static void IRAM_ATTR ps2_gpio_isr(void *arg)
     if (isr_arg->is_clk) {
         if (clk == 0 && !p->tx_active && !p->rx_active) {
             p->link_state = PS2_LINK_INHIBITED;
-        } else if (clk == 1 && p->link_state == PS2_LINK_INHIBITED && !p->tx_active && !p->rx_active) {
-            p->link_state = PS2_LINK_IDLE;
+        } else if (clk == 1 && !p->tx_active && !p->rx_active) {
+            /*
+             * Host request-to-send can be:
+             * 1) pull CLK low, 2) pull DAT low, 3) release CLK high.
+             * If DAT fell while CLK was low, detect it here on CLK rising edge.
+             */
+            if (dat == 0 && !p->host_req_pending) {
+                p->host_req_pending = true;
+                p->link_state = PS2_LINK_HOST_REQ_DETECTED;
+                p->ticks_to_step = 1;
+            } else if (p->link_state == PS2_LINK_INHIBITED) {
+                p->link_state = PS2_LINK_IDLE;
+            }
         }
     } else {
-        if (dat == 0 && clk == 1 && !p->tx_active && !p->rx_active) {
+        // DAT falling while CLK is high can be a direct host request-to-send.
+        if (dat == 0 && clk == 1 && !p->tx_active && !p->rx_active && !p->host_req_pending) {
             p->host_req_pending = true;
             p->link_state = PS2_LINK_HOST_REQ_DETECTED;
             p->ticks_to_step = 1;

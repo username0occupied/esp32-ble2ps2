@@ -1,0 +1,23 @@
+menu "Input Router"
+
+choice INPUT_ROUTER_SWITCH_STRATEGY
+    prompt "PC Switch Strategy"
+    default INPUT_ROUTER_SWITCH_KEYBOARD_PAGE
+    help
+        Select which hotkeys are intercepted to switch active PC output target.
+
+    config INPUT_ROUTER_SWITCH_KEYBOARD_PAGE
+        bool "Keyboard PageUp/PageDown"
+        help
+            PageUp switches to PC1 and PageDown switches to PC2.
+            The hotkeys are intercepted and not forwarded to PS/2.
+
+    config INPUT_ROUTER_SWITCH_MOUSE_SIDE
+        bool "Mouse side buttons (Forward/Back)"
+        help
+            Mouse side Forward button (b5) switches to PC1 and
+            Back button (b4) switches to PC2.
+            Side-button hotkeys are intercepted and not forwarded to PS/2.
+endchoice
+
+endmenu

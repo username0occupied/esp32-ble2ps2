@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "sdkconfig.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -46,7 +47,12 @@ static void *s_status_ctx;
 
 static bool is_switch_usage(uint8_t usage)
 {
+#if CONFIG_INPUT_ROUTER_SWITCH_KEYBOARD_PAGE
     return usage == HID_USAGE_PAGEUP || usage == HID_USAGE_PAGEDOWN;
+#else
+    (void)usage;
+    return false;
+#endif
 }
 
 static scancode_map_t map_usage_to_set2(uint8_t usage)
@@ -430,6 +436,7 @@ void input_router_on_kbd_report(const bt_kbd_report_t *r, void *ctx)
     prev_btns.b5 = s_mouse_b5;
     active_pc = s_status.active_pc;
 
+#if CONFIG_INPUT_ROUTER_SWITCH_KEYBOARD_PAGE
     if (!prev_down[HID_USAGE_PAGEUP] && next_down[HID_USAGE_PAGEUP]) {
         switched = true;
         switch_target = 0;
@@ -442,6 +449,7 @@ void input_router_on_kbd_report(const bt_kbd_report_t *r, void *ctx)
     prev_down[HID_USAGE_PAGEDOWN] = false;
     next_down[HID_USAGE_PAGEUP] = false;
     next_down[HID_USAGE_PAGEDOWN] = false;
+#endif
     portEXIT_CRITICAL(&s_lock);
 
     if (switched && switch_target != active_pc) {
@@ -493,7 +501,18 @@ void input_router_on_mouse_report(const bt_mouse_report_t *r, void *ctx)
     uint8_t prev_middle;
     uint8_t prev_b4;
     uint8_t prev_b5;
+    uint8_t new_left;
+    uint8_t new_right;
+    uint8_t new_middle;
+    uint8_t new_b4;
+    uint8_t new_b5;
     bool btn_changed;
+#if CONFIG_INPUT_ROUTER_SWITCH_MOUSE_SIDE
+    uint8_t active_pc;
+    bool prev_down[256];
+    bool switched = false;
+    uint8_t switch_target = 0;
+#endif
 
     (void)ctx;
     if (!r) {
@@ -501,21 +520,81 @@ void input_router_on_mouse_report(const bt_mouse_report_t *r, void *ctx)
     }
 
     portENTER_CRITICAL(&s_lock);
+#if CONFIG_INPUT_ROUTER_SWITCH_MOUSE_SIDE
+    active_pc = s_status.active_pc;
+#endif
     prev_left = s_mouse_left;
     prev_right = s_mouse_right;
     prev_middle = s_mouse_middle;
     prev_b4 = s_mouse_b4;
     prev_b5 = s_mouse_b5;
-    s_mouse_left = r->left ? 1 : 0;
-    s_mouse_right = r->right ? 1 : 0;
-    s_mouse_middle = r->middle ? 1 : 0;
-    s_mouse_b4 = r->b4 ? 1 : 0;
-    s_mouse_b5 = r->b5 ? 1 : 0;
-    btn_changed = (prev_left != s_mouse_left) ||
-                  (prev_right != s_mouse_right) ||
-                  (prev_middle != s_mouse_middle) ||
-                  (prev_b4 != s_mouse_b4) ||
-                  (prev_b5 != s_mouse_b5);
+#if CONFIG_INPUT_ROUTER_SWITCH_MOUSE_SIDE
+    memcpy(prev_down, s_key_down, sizeof(prev_down));
+#endif
+    portEXIT_CRITICAL(&s_lock);
+
+    new_left = r->left ? 1 : 0;
+    new_right = r->right ? 1 : 0;
+    new_middle = r->middle ? 1 : 0;
+    new_b4 = r->b4 ? 1 : 0;
+    new_b5 = r->b5 ? 1 : 0;
+
+#if CONFIG_INPUT_ROUTER_SWITCH_MOUSE_SIDE
+    // Mouse side Forward button (b5) -> PC1, Back button (b4) -> PC2.
+    if (!prev_b5 && new_b5) {
+        switched = true;
+        switch_target = 0;
+    } else if (!prev_b4 && new_b4) {
+        switched = true;
+        switch_target = 1;
+    }
+
+    // Side buttons are hotkeys in this mode and must not be forwarded to PS/2.
+    new_b4 = 0;
+    new_b5 = 0;
+
+    if (switched && switch_target != active_pc) {
+        mouse_buttons_snapshot_t prev_btns = {
+            .left = prev_left,
+            .right = prev_right,
+            .middle = prev_middle,
+            .b4 = prev_b4,
+            .b5 = prev_b5,
+        };
+        release_all_to_pc(active_pc, prev_down, &prev_btns);
+
+        portENTER_CRITICAL(&s_lock);
+        s_status.active_pc = switch_target;
+        memset(s_key_down, 0, sizeof(s_key_down));
+        s_mouse_left = 0;
+        s_mouse_right = 0;
+        s_mouse_middle = 0;
+        s_mouse_b4 = 0;
+        s_mouse_b5 = 0;
+        s_mouse_accum_dx = 0;
+        s_mouse_accum_dy = 0;
+        s_mouse_accum_wheel = 0;
+        s_mouse_btn_dirty = false;
+        portEXIT_CRITICAL(&s_lock);
+
+        ESP_LOGI(TAG, "Switched active PC to %u", (unsigned)(switch_target + 1));
+        status_notify();
+        return;
+    }
+#endif
+
+    btn_changed = (prev_left != new_left) ||
+                  (prev_right != new_right) ||
+                  (prev_middle != new_middle) ||
+                  (prev_b4 != new_b4) ||
+                  (prev_b5 != new_b5);
+
+    portENTER_CRITICAL(&s_lock);
+    s_mouse_left = new_left;
+    s_mouse_right = new_right;
+    s_mouse_middle = new_middle;
+    s_mouse_b4 = new_b4;
+    s_mouse_b5 = new_b5;
     if (btn_changed) {
         s_mouse_btn_dirty = true;
     }
@@ -568,6 +647,11 @@ void input_router_on_ps2_led(uint8_t pc_idx, const ps2_kbd_led_state_t *state, v
     portENTER_CRITICAL(&s_lock);
     s_status.pc_led[pc_idx] = *state;
     portEXIT_CRITICAL(&s_lock);
+    ESP_LOGI(TAG, "PC%u LED state updated: num=%u caps=%u scroll=%u",
+             (unsigned)pc_idx + 1,
+             state->num ? 1U : 0U,
+             state->caps ? 1U : 0U,
+             state->scroll ? 1U : 0U);
     status_notify();
 }
 

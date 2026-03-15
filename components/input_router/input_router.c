@@ -12,6 +12,13 @@
 #define HID_USAGE_PAGEUP 0x4B
 #define HID_USAGE_PAGEDOWN 0x4E
 #define MOUSE_FLUSH_BURST_MAX 6
+// PS/2 keyboard default typematic: delay 500 ms, rate 10.9 cps (~91.7 ms per repeat).
+#define KBD_REPEAT_DELAY_MS 500
+#define KBD_REPEAT_PERIOD_MS 92
+
+#ifndef CONFIG_INPUT_ROUTER_MAGIC_TEXT
+#define CONFIG_INPUT_ROUTER_MAGIC_TEXT ""
+#endif
 
 static const char *TAG = "INPUT_ROUTER";
 
@@ -37,11 +44,18 @@ static uint8_t s_mouse_right;
 static uint8_t s_mouse_middle;
 static uint8_t s_mouse_b4;
 static uint8_t s_mouse_b5;
+static uint8_t s_mouse_raw_b4;
+static uint8_t s_mouse_raw_b5;
 static int16_t s_mouse_accum_dx;
 static int16_t s_mouse_accum_dy;
 static int16_t s_mouse_accum_wheel;
 static bool s_mouse_btn_dirty;
 static TaskHandle_t s_mouse_flush_task;
+static TaskHandle_t s_kbd_repeat_task;
+static bool s_kbd_repeat_active;
+static uint8_t s_kbd_repeat_usage;
+static uint8_t s_kbd_repeat_pc;
+static TickType_t s_kbd_repeat_next_tick;
 static input_router_status_cb_t s_status_cb;
 static void *s_status_ctx;
 
@@ -226,6 +240,174 @@ static void log_mouse_send_error(uint8_t pc_idx, esp_err_t err)
     ESP_LOGW(TAG, "PS/2 mouse send failed on PC%u: %s", (unsigned)pc_idx + 1, esp_err_to_name(err));
 }
 
+static bool ascii_to_hid_usage(char ch, uint8_t *usage, bool *need_shift)
+{
+    if (usage == NULL || need_shift == NULL) {
+        return false;
+    }
+
+    if (ch >= 'a' && ch <= 'z') {
+        *usage = (uint8_t)(0x04 + (ch - 'a'));
+        *need_shift = false;
+        return true;
+    }
+    if (ch >= 'A' && ch <= 'Z') {
+        *usage = (uint8_t)(0x04 + (ch - 'A'));
+        *need_shift = true;
+        return true;
+    }
+    if (ch >= '1' && ch <= '9') {
+        *usage = (uint8_t)(0x1E + (ch - '1'));
+        *need_shift = false;
+        return true;
+    }
+    if (ch == '0') {
+        *usage = 0x27;
+        *need_shift = false;
+        return true;
+    }
+    return false;
+}
+
+static void type_magic_string(uint8_t pc_idx)
+{
+    static const char *k_magic = CONFIG_INPUT_ROUTER_MAGIC_TEXT;
+    static const uint8_t k_lshift_usage = 0xE1; // Left Shift
+
+    if (k_magic == NULL || k_magic[0] == '\0') {
+        return;
+    }
+
+    for (size_t i = 0; k_magic[i] != '\0'; ++i) {
+        uint8_t usage = 0;
+        bool need_shift = false;
+        if (!ascii_to_hid_usage(k_magic[i], &usage, &need_shift)) {
+            ESP_LOGW(TAG, "unsupported magic char '%c' (0x%02X)", k_magic[i], (unsigned char)k_magic[i]);
+            continue;
+        }
+
+        if (need_shift) {
+            esp_err_t err = send_make(pc_idx, k_lshift_usage);
+            log_kbd_send_error("make", pc_idx, k_lshift_usage, err);
+        }
+
+        esp_err_t err = send_make(pc_idx, usage);
+        log_kbd_send_error("make", pc_idx, usage, err);
+        err = send_break(pc_idx, usage);
+        log_kbd_send_error("break", pc_idx, usage, err);
+
+        if (need_shift) {
+            err = send_break(pc_idx, k_lshift_usage);
+            log_kbd_send_error("break", pc_idx, k_lshift_usage, err);
+        }
+    }
+}
+
+static bool is_typematic_eligible(uint8_t usage)
+{
+    if (is_switch_usage(usage)) {
+        return false;
+    }
+    // Modifiers and lock keys are not typematic candidates.
+    if ((usage >= 0xE0 && usage <= 0xE7) || usage == 0x39 || usage == 0x47 || usage == 0x53) {
+        return false;
+    }
+
+    scancode_map_t map = map_usage_to_set2(usage);
+    return map.len > 0 && map.breakable;
+}
+
+static inline void kbd_repeat_notify(void)
+{
+    if (s_kbd_repeat_task) {
+        xTaskNotifyGive(s_kbd_repeat_task);
+    }
+}
+
+static void kbd_repeat_stop_locked(void)
+{
+    s_kbd_repeat_active = false;
+    s_kbd_repeat_usage = 0;
+    s_kbd_repeat_next_tick = 0;
+}
+
+static void kbd_repeat_start_locked(uint8_t pc_idx, uint8_t usage)
+{
+    TickType_t delay = pdMS_TO_TICKS(KBD_REPEAT_DELAY_MS);
+    if (delay == 0) {
+        delay = 1;
+    }
+    s_kbd_repeat_active = true;
+    s_kbd_repeat_pc = pc_idx;
+    s_kbd_repeat_usage = usage;
+    s_kbd_repeat_next_tick = xTaskGetTickCount() + delay;
+}
+
+static void kbd_repeat_update_from_report_locked(const bool prev[256], const bool next[256], uint8_t active_pc)
+{
+    if (s_kbd_repeat_active) {
+        if (s_kbd_repeat_pc != active_pc || !next[s_kbd_repeat_usage]) {
+            kbd_repeat_stop_locked();
+        }
+    }
+
+    uint8_t candidate = 0;
+    bool found = false;
+    for (int u = 0; u < 256; ++u) {
+        if (!prev[u] && next[u] && is_typematic_eligible((uint8_t)u)) {
+            candidate = (uint8_t)u;
+            found = true;
+        }
+    }
+
+    if (found) {
+        kbd_repeat_start_locked(active_pc, candidate);
+    }
+}
+
+static void kbd_repeat_task(void *ctx)
+{
+    (void)ctx;
+    while (true) {
+        TickType_t wait_ticks = portMAX_DELAY;
+        uint8_t usage = 0;
+        uint8_t pc_idx = 0;
+        bool send_repeat = false;
+
+        portENTER_CRITICAL(&s_lock);
+        if (s_kbd_repeat_active) {
+            const bool still_down = s_key_down[s_kbd_repeat_usage];
+            const bool pc_match = (s_status.active_pc == s_kbd_repeat_pc);
+            if (!still_down || !pc_match) {
+                kbd_repeat_stop_locked();
+            } else {
+                TickType_t now = xTaskGetTickCount();
+                if ((int32_t)(now - s_kbd_repeat_next_tick) >= 0) {
+                    send_repeat = true;
+                    usage = s_kbd_repeat_usage;
+                    pc_idx = s_kbd_repeat_pc;
+                    TickType_t period = pdMS_TO_TICKS(KBD_REPEAT_PERIOD_MS);
+                    if (period == 0) {
+                        period = 1;
+                    }
+                    s_kbd_repeat_next_tick = now + period;
+                } else {
+                    wait_ticks = s_kbd_repeat_next_tick - now;
+                }
+            }
+        }
+        portEXIT_CRITICAL(&s_lock);
+
+        if (send_repeat) {
+            esp_err_t err = send_make(pc_idx, usage);
+            log_kbd_send_error("make", pc_idx, usage, err);
+            continue;
+        }
+
+        (void)ulTaskNotifyTake(pdTRUE, wait_ticks);
+    }
+}
+
 static int8_t clamp_i16_to_i8_step(int16_t *accum, int16_t min_step, int16_t max_step)
 {
     int16_t v = *accum;
@@ -378,10 +560,16 @@ esp_err_t input_router_init(input_router_status_cb_t cb, void *ctx)
     s_mouse_middle = 0;
     s_mouse_b4 = 0;
     s_mouse_b5 = 0;
+    s_mouse_raw_b4 = 0;
+    s_mouse_raw_b5 = 0;
     s_mouse_accum_dx = 0;
     s_mouse_accum_dy = 0;
     s_mouse_accum_wheel = 0;
     s_mouse_btn_dirty = false;
+    s_kbd_repeat_active = false;
+    s_kbd_repeat_usage = 0;
+    s_kbd_repeat_pc = 0;
+    s_kbd_repeat_next_tick = 0;
     s_status_cb = cb;
     s_status_ctx = ctx;
     portEXIT_CRITICAL(&s_lock);
@@ -389,6 +577,13 @@ esp_err_t input_router_init(input_router_status_cb_t cb, void *ctx)
     if (s_mouse_flush_task == NULL) {
         if (xTaskCreate(mouse_flush_task, "mouse_flush", 3072, NULL, 8, &s_mouse_flush_task) != pdPASS) {
             ESP_LOGE(TAG, "mouse flush task create failed");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    if (s_kbd_repeat_task == NULL) {
+        if (xTaskCreate(kbd_repeat_task, "kbd_repeat", 3072, NULL, 8, &s_kbd_repeat_task) != pdPASS) {
+            ESP_LOGE(TAG, "keyboard repeat task create failed");
             return ESP_ERR_NO_MEM;
         }
     }
@@ -485,8 +680,10 @@ void input_router_on_kbd_report(const bt_kbd_report_t *r, void *ctx)
         s_mouse_accum_wheel = 0;
         s_mouse_btn_dirty = false;
     }
+    kbd_repeat_update_from_report_locked(prev_down, next_down, active_pc);
     memcpy(s_key_down, next_down, sizeof(s_key_down));
     portEXIT_CRITICAL(&s_lock);
+    kbd_repeat_notify();
 
     if (target_changed) {
         ESP_LOGI(TAG, "Switched active PC to %u", (unsigned)(active_pc + 1));
@@ -506,12 +703,19 @@ void input_router_on_mouse_report(const bt_mouse_report_t *r, void *ctx)
     uint8_t new_middle;
     uint8_t new_b4;
     uint8_t new_b5;
+#if CONFIG_INPUT_ROUTER_SWITCH_MOUSE_SIDE
+    uint8_t prev_raw_b4;
+    uint8_t prev_raw_b5;
+    uint8_t new_raw_b4;
+    uint8_t new_raw_b5;
+#endif
     bool btn_changed;
 #if CONFIG_INPUT_ROUTER_SWITCH_MOUSE_SIDE
     uint8_t active_pc;
     bool prev_down[256];
     bool switched = false;
     uint8_t switch_target = 0;
+    bool repeated_hotkey = false;
 #endif
 
     (void)ctx;
@@ -529,6 +733,8 @@ void input_router_on_mouse_report(const bt_mouse_report_t *r, void *ctx)
     prev_b4 = s_mouse_b4;
     prev_b5 = s_mouse_b5;
 #if CONFIG_INPUT_ROUTER_SWITCH_MOUSE_SIDE
+    prev_raw_b4 = s_mouse_raw_b4;
+    prev_raw_b5 = s_mouse_raw_b5;
     memcpy(prev_down, s_key_down, sizeof(prev_down));
 #endif
     portEXIT_CRITICAL(&s_lock);
@@ -540,13 +746,18 @@ void input_router_on_mouse_report(const bt_mouse_report_t *r, void *ctx)
     new_b5 = r->b5 ? 1 : 0;
 
 #if CONFIG_INPUT_ROUTER_SWITCH_MOUSE_SIDE
+    new_raw_b4 = new_b4;
+    new_raw_b5 = new_b5;
+
     // Mouse side Forward button (b5) -> PC1, Back button (b4) -> PC2.
-    if (!prev_b5 && new_b5) {
+    if (!prev_raw_b5 && new_raw_b5) {
         switched = true;
         switch_target = 0;
-    } else if (!prev_b4 && new_b4) {
+        repeated_hotkey = (active_pc == 0);
+    } else if (!prev_raw_b4 && new_raw_b4) {
         switched = true;
         switch_target = 1;
+        repeated_hotkey = (active_pc == 1);
     }
 
     // Side buttons are hotkeys in this mode and must not be forwarded to PS/2.
@@ -566,20 +777,28 @@ void input_router_on_mouse_report(const bt_mouse_report_t *r, void *ctx)
         portENTER_CRITICAL(&s_lock);
         s_status.active_pc = switch_target;
         memset(s_key_down, 0, sizeof(s_key_down));
+        kbd_repeat_stop_locked();
         s_mouse_left = 0;
         s_mouse_right = 0;
         s_mouse_middle = 0;
         s_mouse_b4 = 0;
         s_mouse_b5 = 0;
+        s_mouse_raw_b4 = new_raw_b4;
+        s_mouse_raw_b5 = new_raw_b5;
         s_mouse_accum_dx = 0;
         s_mouse_accum_dy = 0;
         s_mouse_accum_wheel = 0;
         s_mouse_btn_dirty = false;
         portEXIT_CRITICAL(&s_lock);
+        kbd_repeat_notify();
 
         ESP_LOGI(TAG, "Switched active PC to %u", (unsigned)(switch_target + 1));
         status_notify();
         return;
+    }
+
+    if (repeated_hotkey) {
+        type_magic_string(active_pc);
     }
 #endif
 
@@ -595,6 +814,10 @@ void input_router_on_mouse_report(const bt_mouse_report_t *r, void *ctx)
     s_mouse_middle = new_middle;
     s_mouse_b4 = new_b4;
     s_mouse_b5 = new_b5;
+#if CONFIG_INPUT_ROUTER_SWITCH_MOUSE_SIDE
+    s_mouse_raw_b4 = new_raw_b4;
+    s_mouse_raw_b5 = new_raw_b5;
+#endif
     if (btn_changed) {
         s_mouse_btn_dirty = true;
     }

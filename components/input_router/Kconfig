@@ -20,4 +20,13 @@ choice INPUT_ROUTER_SWITCH_STRATEGY
             Side-button hotkeys are intercepted and not forwarded to PS/2.
 endchoice
 
+config INPUT_ROUTER_MAGIC_TEXT
+    string "Repeated side-button output text"
+    depends on INPUT_ROUTER_SWITCH_MOUSE_SIDE
+    default ""
+    help
+        Text sent via keyboard when pressing the side-button hotkey
+        for the already-active target PC.
+        Leave empty to disable this output.
+
 endmenu

@@ -24,3 +24,4 @@ sdkconfig.old
 # Python cache (if tooling scripts are added later)
 __pycache__/
 *.pyc
+sdkconfig

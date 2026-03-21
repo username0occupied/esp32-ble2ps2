@@ -24,6 +24,7 @@ typedef struct {
 
     uint8_t resolution;
     uint8_t sample_rate;
+    uint16_t host_last16;
     uint8_t last_sample_rate[3];
 
     bool has_wheel;
@@ -43,6 +44,8 @@ typedef struct {
 static const char *TAG = "PS2MOUSE";
 static mouse_state_t s_mouse[2];
 static bool s_logged_wheel_not_enabled[2];
+static ps2_mouse_unhandled_cmd_cb_t s_unhandled_cmd_cb;
+static void *s_unhandled_cmd_ctx;
 
 static ps2_port_id_t port_from_pc(uint8_t pc_idx)
 {
@@ -52,6 +55,13 @@ static ps2_port_id_t port_from_pc(uint8_t pc_idx)
 static inline void mouse_send(uint8_t pc_idx, uint8_t byte)
 {
     (void)ps2emu_core_send_byte(port_from_pc(pc_idx), byte);
+}
+
+static void emit_unhandled_cmd(uint8_t pc_idx, uint16_t last_cmd16)
+{
+    if (s_unhandled_cmd_cb) {
+        s_unhandled_cmd_cb(pc_idx, last_cmd16, s_unhandled_cmd_ctx);
+    }
 }
 
 static void mouse_defaults(uint8_t pc_idx, bool demo_force_output)
@@ -241,6 +251,8 @@ void ps2emu_mouse_handle_host_byte(uint8_t pc_idx, uint8_t byte, bool parity_err
         return;
     }
 
+    m->host_last16 = (uint16_t)((m->host_last16 << 8) | byte);
+
     if (m->wrap_mode) {
         if (byte == 0xFF) {
             m->wrap_mode = false;
@@ -365,8 +377,16 @@ void ps2emu_mouse_handle_host_byte(uint8_t pc_idx, uint8_t byte, bool parity_err
 
         default:
             mouse_send(pc_idx, 0xFE);
+            emit_unhandled_cmd(pc_idx, m->host_last16);
             break;
     }
+}
+
+esp_err_t ps2emu_mouse_set_unhandled_cmd_callback(ps2_mouse_unhandled_cmd_cb_t cb, void *ctx)
+{
+    s_unhandled_cmd_cb = cb;
+    s_unhandled_cmd_ctx = ctx;
+    return ESP_OK;
 }
 
 esp_err_t ps2emu_mouse_send_report(uint8_t pc_idx, int8_t dx, int8_t dy, int8_t wheel,

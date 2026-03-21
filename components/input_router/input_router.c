@@ -837,6 +837,8 @@ void input_router_on_kbd_conn(bool connected, void *ctx)
     (void)ctx;
     portENTER_CRITICAL(&s_lock);
     s_status.bt_kbd_connected = connected;
+    s_status.bt_kbd_battery_valid = false;
+    s_status.bt_kbd_battery = 0;
     portEXIT_CRITICAL(&s_lock);
     status_notify();
 }
@@ -846,6 +848,28 @@ void input_router_on_mouse_conn(bool connected, void *ctx)
     (void)ctx;
     portENTER_CRITICAL(&s_lock);
     s_status.bt_mouse_connected = connected;
+    s_status.bt_mouse_battery_valid = false;
+    s_status.bt_mouse_battery = 0;
+    portEXIT_CRITICAL(&s_lock);
+    status_notify();
+}
+
+void input_router_on_kbd_battery(bool available, uint8_t level, void *ctx)
+{
+    (void)ctx;
+    portENTER_CRITICAL(&s_lock);
+    s_status.bt_kbd_battery_valid = available;
+    s_status.bt_kbd_battery = available ? level : 0;
+    portEXIT_CRITICAL(&s_lock);
+    status_notify();
+}
+
+void input_router_on_mouse_battery(bool available, uint8_t level, void *ctx)
+{
+    (void)ctx;
+    portENTER_CRITICAL(&s_lock);
+    s_status.bt_mouse_battery_valid = available;
+    s_status.bt_mouse_battery = available ? level : 0;
     portEXIT_CRITICAL(&s_lock);
     status_notify();
 }
@@ -887,6 +911,36 @@ void input_router_on_ps2_init(uint8_t pc_idx, bool inited, void *ctx)
 
     portENTER_CRITICAL(&s_lock);
     s_status.pc_kbd_initialized[pc_idx] = inited;
+    portEXIT_CRITICAL(&s_lock);
+    status_notify();
+}
+
+void input_router_on_ps2_kbd_unhandled_cmd(uint8_t pc_idx, uint16_t last_cmd16, void *ctx)
+{
+    (void)ctx;
+    if (pc_idx >= 2) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_lock);
+    s_status.pc_last_unhandled_valid[pc_idx] = true;
+    s_status.pc_last_unhandled_mouse[pc_idx] = false;
+    s_status.pc_last_unhandled_cmd16[pc_idx] = last_cmd16;
+    portEXIT_CRITICAL(&s_lock);
+    status_notify();
+}
+
+void input_router_on_ps2_mouse_unhandled_cmd(uint8_t pc_idx, uint16_t last_cmd16, void *ctx)
+{
+    (void)ctx;
+    if (pc_idx >= 2) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_lock);
+    s_status.pc_last_unhandled_valid[pc_idx] = true;
+    s_status.pc_last_unhandled_mouse[pc_idx] = true;
+    s_status.pc_last_unhandled_cmd16[pc_idx] = last_cmd16;
     portEXIT_CRITICAL(&s_lock);
     status_notify();
 }

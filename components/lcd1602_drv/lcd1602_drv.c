@@ -37,6 +37,30 @@ static const uint8_t s_left_arrow_pattern[8] = {
     0x00,
 };
 
+static void lcd_write_battery_field(char *dst, bool valid, uint8_t level)
+{
+    char text[4];
+
+    if (!valid) {
+        memcpy(dst, "   ", 3);
+        return;
+    }
+
+    if (level > 100) {
+        level = 100;
+    }
+    snprintf(text, sizeof(text), "%3u", (unsigned)level);
+    memcpy(dst, text, 3);
+}
+
+static void lcd_write_unhandled_field(char *dst, bool is_mouse, uint16_t cmd16)
+{
+    char text[6];
+
+    snprintf(text, sizeof(text), "%c%04X", is_mouse ? 'M' : 'K', (unsigned)cmd16);
+    memcpy(dst, text, 5);
+}
+
 static void lcd_compose_line(char out[17], const input_router_status_t *st, uint8_t pc_idx, bool show_bt_cols)
 {
     memset(out, ' ', 16);
@@ -57,6 +81,16 @@ static void lcd_compose_line(char out[17], const input_router_status_t *st, uint
             snprintf(passkey, sizeof(passkey), "%06" PRIu32, st->passkey % 1000000UL);
             memcpy(&out[7], passkey, 6);
         }
+    } else {
+        lcd_write_battery_field(&out[5], st->bt_kbd_battery_valid, st->bt_kbd_battery);
+        lcd_write_battery_field(&out[8], st->bt_mouse_battery_valid, st->bt_mouse_battery);
+    }
+
+    // Column 12..16 (1-based): unsupported host command marker, higher priority than passkey.
+    if (st->pc_last_unhandled_valid[pc_idx]) {
+        lcd_write_unhandled_field(&out[11],
+                                  st->pc_last_unhandled_mouse[pc_idx],
+                                  st->pc_last_unhandled_cmd16[pc_idx]);
     }
 }
 

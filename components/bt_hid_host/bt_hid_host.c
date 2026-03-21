@@ -209,6 +209,20 @@ static void emit_mouse_conn(bool connected)
     }
 }
 
+static void emit_kbd_battery(bool available, uint8_t level)
+{
+    if (s_callbacks.on_kbd_battery) {
+        s_callbacks.on_kbd_battery(available, level, s_callbacks_ctx);
+    }
+}
+
+static void emit_mouse_battery(bool available, uint8_t level)
+{
+    if (s_callbacks.on_mouse_battery) {
+        s_callbacks.on_mouse_battery(available, level, s_callbacks_ctx);
+    }
+}
+
 static void emit_passkey(bool show, uint32_t passkey)
 {
     if (s_callbacks.on_passkey) {
@@ -1073,8 +1087,14 @@ static void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id,
     }
     case ESP_HIDH_BATTERY_EVENT: {
         const uint8_t *bda = esp_hidh_dev_bda_get(param->battery.dev);
+        hid_role_t role = hid_role_from_dev(param->battery.dev, ESP_HID_USAGE_GENERIC);
         if (bda) {
             ESP_LOGI(TAG, ESP_BD_ADDR_STR " BATTERY: %d%%", ESP_BD_ADDR_HEX(bda), param->battery.level);
+        }
+        if (role == HID_ROLE_KEYBOARD) {
+            emit_kbd_battery(true, param->battery.level);
+        } else if (role == HID_ROLE_MOUSE) {
+            emit_mouse_battery(true, param->battery.level);
         }
         break;
     }
@@ -1150,10 +1170,12 @@ static void hidh_callback(void *handler_args, esp_event_base_t base, int32_t id,
             if (s_known_kbd.valid && hid_bda_equal(bda, s_known_kbd.bda)) {
                 s_kbd_connected = false;
                 emit_kbd_conn(false);
+                emit_kbd_battery(false, 0);
             }
             if (s_known_mouse.valid && hid_bda_equal(bda, s_known_mouse.bda)) {
                 s_mouse_connected = false;
                 emit_mouse_conn(false);
+                emit_mouse_battery(false, 0);
                 s_mouse_min_interval_locked = false;
                 s_mouse_min_interval_units = 0;
                 s_mouse_conn_probe_stage = 0;

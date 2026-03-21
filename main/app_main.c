@@ -8,6 +8,7 @@
 #include "nvs_flash.h"
 #include "ps2emu.h"
 #include "ps2emu_keyboard.h"
+#include "ps2emu_mouse.h"
 
 static const char *TAG = "APP";
 
@@ -52,6 +53,8 @@ void app_main(void)
         .on_mouse_report = input_router_on_mouse_report,
         .on_kbd_conn = input_router_on_kbd_conn,
         .on_mouse_conn = input_router_on_mouse_conn,
+        .on_kbd_battery = input_router_on_kbd_battery,
+        .on_mouse_battery = input_router_on_mouse_battery,
         .on_passkey = input_router_on_passkey,
     };
     input_router_status_t status = {0};
@@ -78,6 +81,8 @@ void app_main(void)
     ESP_ERROR_CHECK(ps2emu_init(&ps2_cfg));
     ESP_ERROR_CHECK(ps2emu_keyboard_set_led_callback(input_router_on_ps2_led, NULL));
     ESP_ERROR_CHECK(ps2emu_keyboard_set_init_callback(input_router_on_ps2_init, NULL));
+    ESP_ERROR_CHECK(ps2emu_keyboard_set_unhandled_cmd_callback(input_router_on_ps2_kbd_unhandled_cmd, NULL));
+    ESP_ERROR_CHECK(ps2emu_mouse_set_unhandled_cmd_callback(input_router_on_ps2_mouse_unhandled_cmd, NULL));
     ESP_ERROR_CHECK(ps2emu_start());
 
     ESP_ERROR_CHECK(bt_hid_host_init(&bt_cbs, NULL));

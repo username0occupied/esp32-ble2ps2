@@ -33,6 +33,8 @@ typedef struct {
     void (*on_mouse_report)(const bt_mouse_report_t *r, void *ctx);
     void (*on_kbd_conn)(bool connected, void *ctx);
     void (*on_mouse_conn)(bool connected, void *ctx);
+    void (*on_kbd_battery)(bool available, uint8_t level, void *ctx);
+    void (*on_mouse_battery)(bool available, uint8_t level, void *ctx);
     void (*on_passkey)(bool show, uint32_t passkey, void *ctx);
 } bt_hid_host_callbacks_t;
 

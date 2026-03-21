@@ -17,6 +17,7 @@ typedef struct {
     bool scanning_enabled;
     bool initialized;
     uint8_t scan_set;
+    uint16_t host_last16;
     ps2_kbd_led_state_t led;
 } kbd_state_t;
 
@@ -26,6 +27,8 @@ static ps2_kbd_led_cb_t s_led_cb;
 static void *s_led_cb_ctx;
 static ps2_kbd_init_cb_t s_init_cb;
 static void *s_init_cb_ctx;
+static ps2_kbd_unhandled_cmd_cb_t s_unhandled_cmd_cb;
+static void *s_unhandled_cmd_ctx;
 
 static ps2_port_id_t port_from_pc(uint8_t pc_idx)
 {
@@ -67,6 +70,13 @@ static void emit_init_event_if_changed(uint8_t pc_idx, bool initialized)
     }
 }
 
+static void emit_unhandled_cmd(uint8_t pc_idx, uint16_t last_cmd16)
+{
+    if (s_unhandled_cmd_cb) {
+        s_unhandled_cmd_cb(pc_idx, last_cmd16, s_unhandled_cmd_ctx);
+    }
+}
+
 void ps2emu_keyboard_init_state(void)
 {
     for (uint8_t i = 0; i < 2; ++i) {
@@ -74,6 +84,7 @@ void ps2emu_keyboard_init_state(void)
         s_kbd[i].scanning_enabled = false;
         s_kbd[i].initialized = false;
         s_kbd[i].scan_set = 2;
+        s_kbd[i].host_last16 = 0;
         s_kbd[i].led.scroll = false;
         s_kbd[i].led.num = false;
         s_kbd[i].led.caps = false;
@@ -99,6 +110,8 @@ void ps2emu_keyboard_handle_host_byte(uint8_t pc_idx, uint8_t byte, bool parity_
         kbd_send(pc_idx, 0xFE);
         return;
     }
+
+    kbd->host_last16 = (uint16_t)((kbd->host_last16 << 8) | byte);
 
     if (kbd->rx_state == KBD_RX_WAIT_LED_MASK) {
         if (byte == 0xED) {
@@ -205,6 +218,7 @@ void ps2emu_keyboard_handle_host_byte(uint8_t pc_idx, uint8_t byte, bool parity_
 
         default:
             kbd_send(pc_idx, 0xFE);
+            emit_unhandled_cmd(pc_idx, kbd->host_last16);
             break;
     }
 }
@@ -220,6 +234,13 @@ esp_err_t ps2emu_keyboard_set_init_callback(ps2_kbd_init_cb_t cb, void *ctx)
 {
     s_init_cb = cb;
     s_init_cb_ctx = ctx;
+    return ESP_OK;
+}
+
+esp_err_t ps2emu_keyboard_set_unhandled_cmd_callback(ps2_kbd_unhandled_cmd_cb_t cb, void *ctx)
+{
+    s_unhandled_cmd_cb = cb;
+    s_unhandled_cmd_ctx = ctx;
     return ESP_OK;
 }
 

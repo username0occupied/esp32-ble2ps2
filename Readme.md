@@ -1,8 +1,7 @@
 
 ---
 
-# 📄 2. README_EN.md（英文版）
-```md
+
 # ESP32C3 Bluetooth HID to PS2 Adapter
 
 A converter based on ESP32C3 & ESP‑IDF V5.5.0.

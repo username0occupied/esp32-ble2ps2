@@ -1,7 +1,3 @@
-
----
-
-
 # ESP32C3 Bluetooth HID to PS2 Adapter
 
 A converter based on ESP32C3 & ESP‑IDF V5.5.0.
@@ -16,48 +12,55 @@ It converts Bluetooth keyboard and mouse signals into standard PS2 protocol for 
 ## Hardware Pinout
 
 ### PS2 Ports
-| Function | GPIO |
-|----------|------|
-| Key1 CLK | 19 |
-| Key1 DAT | 13 |
-| Mouse1 CLK | 12 |
-| Mouse1 DAT | 18 |
-| Key2 CLK | 2 |
-| Key2 DAT | 3 |
-| Mouse2 CLK | 10 |
-| Mouse2 DAT | 6 |
+| Function    | GPIO | Description          |
+|-------------|------|----------------------|
+| Key1 CLK    | 19   | Keyboard for PC 1    |
+| Key1 DAT    | 13   | Keyboard for PC 1    |
+| Mouse1 CLK  | 12   | Mouse for PC 1       |
+| Mouse1 DAT  | 18   | Mouse for PC 1       |
+| Key2 CLK    | 2    | Keyboard for PC 2    |
+| Key2 DAT    | 3    | Keyboard for PC 2    |
+| Mouse2 CLK  | 10   | Mouse for PC 2       |
+| Mouse2 DAT  | 6    | Mouse for PC 2       |
 
 ### LCD1602 I2C
-| Pin | GPIO |
-|-----|------|
-| SCL | 5 |
-| SDA | 4 |
+| Pin  | GPIO | Description   |
+|------|------|---------------|
+| SCL  | 5    | I2C Clock     |
+| SDA  | 4    | I2C Data      |
 
 ## LCD Display Format
 Line 1: PC1 status  
 Line 2: PC2 status
 
-Position definition:
-1: `>` = active host
-2: S = keyboard ready, s = not ready / error
-3: 1 = NumLock on, ← = off
-4: A = CapsLock on, a = off
-5: - = ScrollLock on, | = off
-6: K = BT keyboard connected, k = disconnected
-7: M = BT mouse connected, m = disconnected
-8~13: Bluetooth pairing code (lower priority than error codes)
-Pos12: K/M + 4 hex = unknown incoming command
-Line2 6~8: keyboard battery percentage(Work not well)
-Line2 9~11: mouse battery percentage(Work not well)
+### Position Definition
+| Position | Character/Value | Description                                      |
+|----------|-----------------|--------------------------------------------------|
+| 1        | `>` / None      | `>` = Active/Selected host                       |
+| 2        | S / s           | S = Keyboard ready; s = Not ready/Error          |
+| 3        | 1 / ←           | 1 = NumLock on; ← = NumLock off                  |
+| 4        | A / a           | A = CapsLock on; a = CapsLock off                |
+| 5        | - / \|          | - = ScrollLock on; \| = ScrollLock off           |
+| 6        | K / k           | K = BT keyboard connected; k = Disconnected      |
+| 7        | M / m           | M = BT mouse connected; m = Disconnected         |
+| 8~13     | Pairing Code    | Bluetooth pairing code (lower priority than errors) |
+| 12       | K/M + 4 Hex     | Unknown incoming command (K=Keyboard, M=Mouse)   |
+| Line2 6~8 | Number          | Keyboard battery percentage (e.g., 100 = Full) work not well  |
+| Line2 9~11| Number          | Mouse battery percentage (same format as keyboard) work not well|
 
 ## Development Environment
 - ESP-IDF Version: 5.5.0
 - Drivers from:
-  - Reference/ps2 (tested, shared timer)
+  - Reference/ps2 (tested, 4 PS2 channels share 1 timer)
   - Reference/lcd1602 (I2C, verified)
 
 ## Build & Flash
 ```bash
+# Configure project (verify pins/parameters)
 idf.py menuconfig
+# Compile project
 idf.py build
-idf.py -p PORT flash monitor
+# Flash firmware (replace PORT with COM3 / /dev/ttyUSB0)
+idf.py -p PORT flash
+# View serial logs
+idf.py -p PORT monitor

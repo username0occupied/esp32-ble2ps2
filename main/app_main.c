@@ -62,21 +62,9 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Build date/time: %s %s", __DATE__, __TIME__);
     ESP_ERROR_CHECK(app_nvs_init());
-    esp_err_t lcd_err = lcd1602_drv_init();
-    if (lcd_err == ESP_OK) {
-        lcd_ready = true;
-    } else {
-        ESP_LOGW(TAG, "LCD init failed, continue without LCD: %s", esp_err_to_name(lcd_err));
-    }
 
-    ESP_ERROR_CHECK(input_router_init(lcd_ready ? app_status_to_lcd : NULL, NULL));
-    ESP_ERROR_CHECK(input_router_get_status(&status));
-    if (lcd_ready) {
-        lcd_err = lcd1602_drv_update(&status);
-        if (lcd_err != ESP_OK) {
-            ESP_LOGW(TAG, "lcd initial update failed: %s", esp_err_to_name(lcd_err));
-        }
-    }
+    // Bring up routing core first so PS/2 callbacks can run immediately.
+    ESP_ERROR_CHECK(input_router_init(NULL, NULL));
 
     ESP_ERROR_CHECK(ps2emu_init(&ps2_cfg));
     ESP_ERROR_CHECK(ps2emu_keyboard_set_led_callback(input_router_on_ps2_led, NULL));
@@ -84,6 +72,22 @@ void app_main(void)
     ESP_ERROR_CHECK(ps2emu_keyboard_set_unhandled_cmd_callback(input_router_on_ps2_kbd_unhandled_cmd, NULL));
     ESP_ERROR_CHECK(ps2emu_mouse_set_unhandled_cmd_callback(input_router_on_ps2_mouse_unhandled_cmd, NULL));
     ESP_ERROR_CHECK(ps2emu_start());
+
+    esp_err_t lcd_err = lcd1602_drv_init();
+    if (lcd_err == ESP_OK) {
+        lcd_ready = true;
+        ESP_ERROR_CHECK(input_router_set_status_callback(app_status_to_lcd, NULL));
+    } else {
+        ESP_LOGW(TAG, "LCD init failed, continue without LCD: %s", esp_err_to_name(lcd_err));
+    }
+
+    ESP_ERROR_CHECK(input_router_get_status(&status));
+    if (lcd_ready) {
+        lcd_err = lcd1602_drv_update(&status);
+        if (lcd_err != ESP_OK) {
+            ESP_LOGW(TAG, "lcd initial update failed: %s", esp_err_to_name(lcd_err));
+        }
+    }
 
     ESP_ERROR_CHECK(bt_hid_host_init(&bt_cbs, NULL));
     ESP_ERROR_CHECK(bt_hid_host_start());

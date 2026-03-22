@@ -7,7 +7,7 @@ It converts Bluetooth keyboard and mouse signals into standard PS2 protocol for 
 - Bluetooth keyboard/mouse to 2× PS2 keyboard + 2× PS2 mouse
 - 4 PS2 channels share one timer for efficiency
 - I2C LCD1602 status display
-- Bluetooth pairing code display, battery level, lock status, unknown command debug
+- Bluetooth pairing code display, battery level, lock status
 
 ## Hardware Pinout
 
@@ -64,3 +64,18 @@ idf.py build
 idf.py -p PORT flash
 # View serial logs
 idf.py -p PORT monitor
+```
+## Hardware example
+-Prepare one or two PS2 Male Wire
+![PS2 wire](./source/images/ps2%20male%20to%20male.avif)
+-Prepare a ESP32 Develop Kit
+![ESP32 BOARD](./source/images/esp32%20board.png)
+-Weld the wires to the board as the tables
+![weld wires](./source/images/IMG20260322110555.jpg)
+-Connect to PCS
+![Connect PS2 to PCS](./source/images/IMG20260322110614.jpg)
+-Turn on PC and watch the LCD and try to connect Keyboard, Mouse with BLE, and try to click them
+![Turn on PC](./source/images/IMG20260322105938.jpg)
+
+
+

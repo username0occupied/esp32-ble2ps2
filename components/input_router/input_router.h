@@ -32,6 +32,7 @@ typedef struct {
 typedef void (*input_router_status_cb_t)(const input_router_status_t *status, void *ctx);
 
 esp_err_t input_router_init(input_router_status_cb_t cb, void *ctx);
+esp_err_t input_router_set_status_callback(input_router_status_cb_t cb, void *ctx);
 esp_err_t input_router_get_status(input_router_status_t *out);
 
 void input_router_on_kbd_report(const bt_kbd_report_t *r, void *ctx);

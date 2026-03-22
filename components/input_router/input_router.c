@@ -593,6 +593,16 @@ esp_err_t input_router_init(input_router_status_cb_t cb, void *ctx)
     return ESP_OK;
 }
 
+esp_err_t input_router_set_status_callback(input_router_status_cb_t cb, void *ctx)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_status_cb = cb;
+    s_status_ctx = ctx;
+    portEXIT_CRITICAL(&s_lock);
+    status_notify();
+    return ESP_OK;
+}
+
 esp_err_t input_router_get_status(input_router_status_t *out)
 {
     if (out == NULL) {

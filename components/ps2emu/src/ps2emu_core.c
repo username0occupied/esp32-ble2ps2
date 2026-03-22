@@ -6,6 +6,7 @@
 #include "esp_log.h"
 
 static const char *TAG = "PS2EMU";
+#define PS2EMU_PROTO_TASK_PRIO (configMAX_PRIORITIES - 1)
 
 ps2emu_ctx_t g_ps2emu = {
     .lock = portMUX_INITIALIZER_UNLOCKED,
@@ -187,7 +188,8 @@ esp_err_t ps2emu_start(void)
         return ESP_OK;
     }
 
-    BaseType_t ok = xTaskCreate(ps2emu_protocol_task, "ps2emu_proto", 4096, NULL, 12, &g_ps2emu.proto_task);
+    BaseType_t ok = xTaskCreate(ps2emu_protocol_task, "ps2emu_proto", 4096, NULL,
+                                PS2EMU_PROTO_TASK_PRIO, &g_ps2emu.proto_task);
     ESP_RETURN_ON_FALSE(ok == pdPASS, ESP_ERR_NO_MEM, TAG, "proto task create failed");
 
     ESP_RETURN_ON_ERROR(ps2emu_isr_start(), TAG, "failed to start ISR backend");
